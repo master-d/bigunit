@@ -1,16 +1,9 @@
 #include <SDL3/SDL.h>
 #include <box2d/box2d.h>
 #include "data.h"
+#include "physicsdata.h"
 
-#define MTP 5.0f // meters to pixels
-#define MAX_BODIES 100
-
-uint32_t pship[10][10] = {0};
-
-struct physics_data {
-    b2WorldId worldId;
-    b2BodyId* bodyIds[MAX_BODIES];
-};
+#define MTP 10.0f // meters to pixels
 
 b2WorldId createb2World() {
         // 1. Initialize Box2D World
@@ -22,19 +15,29 @@ b2BodyId createBox(b2WorldId worldId, float x, float y) {
         // 2. Create a Dynamic Box
     b2BodyDef bodyDef = b2DefaultBodyDef();
     bodyDef.type = b2_dynamicBody;
+    bodyDef.fixedRotation = false;
     bodyDef.position = (b2Vec2){x, y}; // Center-screen roughly
     b2BodyId bodyId = b2CreateBody(worldId, &bodyDef);
 
     b2Polygon box = b2MakeBox(0.5f, 0.5f); // 1m x 1m box (half-extents)
     b2ShapeDef shapeDef = b2DefaultShapeDef();
+    shapeDef.density = 1.0f;
     b2CreatePolygonShape(bodyId, &shapeDef, &box);    
 
     return bodyId;
 }
 struct physics_data initPhysicsData() {
-    struct physics_data pdata;
-    pdata.worldId = createb2World();
-    int size = sizeof(pship);
+    struct physics_data pdata = pd_init(createb2World());
+
+    b2BodyDef groundBodyDef = b2DefaultBodyDef();
+    groundBodyDef.position = (b2Vec2){0.0f, 80.0f}; // 10 meters below origin
+    b2BodyId groundId = b2CreateBody(pdata.worldId, &groundBodyDef);
+    b2Polygon groundPolygon = b2MakeBox(50.0f, 10.0f);
+    b2ShapeDef groundShapeDef = b2DefaultShapeDef();
+    b2CreatePolygonShape(groundId, &groundShapeDef, &groundPolygon);
+    pd_add_body(&pdata, groundId);
+
+    int size = 10;
     for (int y = 0; y < size; y++) {
         for (int x=0; x < size; x++) {
             if (pship[y][x] != 0) {
@@ -42,7 +45,7 @@ struct physics_data initPhysicsData() {
                 float posX = x + 5.0f; // Offset to center
                 float posY = y + 2.0f; // Offset to center
                 b2BodyId bodyId = createBox(pdata.worldId, posX, posY);
-                pdata.bodyIds[y * 10 + x] = &bodyId;
+                pd_add_body(&pdata, bodyId);
             }
         }
     }
@@ -81,22 +84,23 @@ int main(int argc, char* argv[]) {
         }        // --- RENDER SECTION ---
         // 3. Step Physics (approx 60fps)
         b2World_Step(pdata.worldId, 1.0f / 60.0f, 4);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%d bodies size %d\n", pdata.count, pdata.capacity);
+
 
         // --- RENDER ---
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
 
         // Get Box position and draw it
-        for (int i = 0; i < MAX_BODIES; i++) {
-            b2BodyId* bodyId = pdata.bodyIds[i];
-            if (bodyId == 0) continue; // Skip uninitialized bodies
-        b2Vec2 pos = b2Body_GetPosition(*bodyId);
-        SDL_FRect rect = {
-            (pos.x - 0.5f) * MTP, // Top-left X
-            (pos.y - 0.5f) * MTP, // Top-left Y
-            1.0f * MTP,           // Width
-            1.0f * MTP            // Height
-        };
+        for (int i = 0; i < pdata.count; i++) {
+            b2BodyId bodyId = pdata.bodyIds[i];
+            b2Vec2 pos = b2Body_GetPosition(bodyId);
+            SDL_FRect rect = {
+                (pos.x - 0.5f) * MTP, // Top-left X
+                (pos.y - 0.5f) * MTP, // Top-left Y
+                1.0f * MTP,           // Width
+                1.0f * MTP            // Height
+            };
 
             SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255); // Green Box
             SDL_RenderFillRect(renderer, &rect);

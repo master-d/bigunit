@@ -1,7 +1,7 @@
 #include "data.h"
 
 // Define and initialize the array
-uint32_t pship[10][10] = {
+const uint32_t pship[10][10] = {
     {0,  0,  0,  0,  0xFF660000,  0xFF660000,  0,  0,  0,  0},
     {0,  0,  0,  0,  0xFF660000,  0xFF660000,  0,  0,  0,  0},
     {0,  0,  0,  0,  0xFF660000,  0xFF660000,  0,  0,  0,  0},

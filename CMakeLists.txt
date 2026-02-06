@@ -11,7 +11,7 @@ find_package(SDL3 REQUIRED)
 find_package(box2d REQUIRED)
 
 # Add executable
-add_executable(bigunit src/main.c)
+add_executable(bigunit src/main.c src/data.c src/physicsdata.c)
 # set_target_properties(bigunit PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Link libraries to the executable
 target_link_libraries(bigunit PRIVATE SDL3::SDL3 box2d::box2d)
