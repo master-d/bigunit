@@ -2,13 +2,167 @@
 #include <box2d/box2d.h>
 #include "data.h"
 #include "physicsdata.h"
+#include <stdbool.h>
+#include <math.h>
+#include <pthread.h>
+#include <stdlib.h>
+
+// Persistent thread-pool implementation for Box2D tasks.
+struct pool_job {
+    b2TaskCallback* task;
+    int start;
+    int end;
+    uint32_t workerIndex;
+    void* taskContext;
+    struct pool_job* next;
+    struct pool_work* parent;
+};
+
+struct pool_work {
+    int remaining;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+};
+
+struct thread_pool {
+    pthread_t* threads;
+    int threadCount;
+    struct pool_job* head;
+    struct pool_job* tail;
+    pthread_mutex_t queue_mutex;
+    pthread_cond_t queue_cond;
+    bool running;
+};
+
+static struct thread_pool g_pool = {0};
+
+static void pool_push_job(struct pool_job* job) {
+    pthread_mutex_lock(&g_pool.queue_mutex);
+    job->next = NULL;
+    if (g_pool.tail) g_pool.tail->next = job;
+    else g_pool.head = job;
+    g_pool.tail = job;
+    pthread_cond_signal(&g_pool.queue_cond);
+    pthread_mutex_unlock(&g_pool.queue_mutex);
+}
+
+static struct pool_job* pool_pop_job(void) {
+    struct pool_job* job = NULL;
+    pthread_mutex_lock(&g_pool.queue_mutex);
+    while (g_pool.running && g_pool.head == NULL) {
+        pthread_cond_wait(&g_pool.queue_cond, &g_pool.queue_mutex);
+    }
+    if (!g_pool.running) {
+        pthread_mutex_unlock(&g_pool.queue_mutex);
+        return NULL;
+    }
+    job = g_pool.head;
+    if (job) {
+        g_pool.head = job->next;
+        if (!g_pool.head) g_pool.tail = NULL;
+    }
+    pthread_mutex_unlock(&g_pool.queue_mutex);
+    return job;
+}
+
+static void* pool_worker(void* vp) {
+    (void)vp;
+    while (g_pool.running) {
+        struct pool_job* job = pool_pop_job();
+        if (!job) break;
+        job->task(job->start, job->end, job->workerIndex, job->taskContext);
+        // signal completion
+        pthread_mutex_lock(&job->parent->mutex);
+        job->parent->remaining -= 1;
+        if (job->parent->remaining == 0) pthread_cond_signal(&job->parent->cond);
+        pthread_mutex_unlock(&job->parent->mutex);
+        free(job);
+    }
+    return NULL;
+}
+
+static void pool_init(int threads) {
+    if (g_pool.running) return;
+    g_pool.threadCount = threads > 0 ? threads : 1;
+    g_pool.threads = malloc(sizeof(pthread_t) * g_pool.threadCount);
+    pthread_mutex_init(&g_pool.queue_mutex, NULL);
+    pthread_cond_init(&g_pool.queue_cond, NULL);
+    g_pool.head = g_pool.tail = NULL;
+    g_pool.running = true;
+    for (int i = 0; i < g_pool.threadCount; i++) pthread_create(&g_pool.threads[i], NULL, pool_worker, NULL);
+}
+
+static void pool_shutdown(void) {
+    if (!g_pool.running) return;
+    pthread_mutex_lock(&g_pool.queue_mutex);
+    g_pool.running = false;
+    pthread_cond_broadcast(&g_pool.queue_cond);
+    pthread_mutex_unlock(&g_pool.queue_mutex);
+    for (int i = 0; i < g_pool.threadCount; i++) pthread_join(g_pool.threads[i], NULL);
+    free(g_pool.threads);
+    g_pool.threads = NULL;
+    g_pool.threadCount = 0;
+    pthread_mutex_destroy(&g_pool.queue_mutex);
+    pthread_cond_destroy(&g_pool.queue_cond);
+}
+
+// Box2D enqueue/finish callbacks using persistent thread-pool
+static void* box2d_enqueue_task(b2TaskCallback* task, int itemCount, int minRange, void* taskContext, void* userContext) {
+    int workerCount = userContext ? *(int*)userContext : g_pool.threadCount;
+    if (!g_pool.running || workerCount <= 1 || itemCount <= 1) {
+        task(0, itemCount, 0, taskContext);
+        return NULL;
+    }
+    int threads = workerCount;
+    if (threads > itemCount) threads = itemCount;
+
+    struct pool_work* work = malloc(sizeof(struct pool_work));
+    pthread_mutex_init(&work->mutex, NULL);
+    pthread_cond_init(&work->cond, NULL);
+    work->remaining = threads;
+
+    for (int t = 0; t < threads; t++) {
+        int start = (itemCount * t) / threads;
+        int end = (itemCount * (t + 1)) / threads;
+        struct pool_job* job = malloc(sizeof(struct pool_job));
+        job->task = task;
+        job->start = start;
+        job->end = end;
+        job->workerIndex = (uint32_t)t;
+        job->taskContext = taskContext;
+        job->parent = work;
+        job->next = NULL;
+        pool_push_job(job);
+    }
+    return work;
+}
+
+static void box2d_finish_task(void* userTask, void* userContext) {
+    (void)userContext;
+    if (!userTask) return;
+    struct pool_work* work = (struct pool_work*)userTask;
+    pthread_mutex_lock(&work->mutex);
+    while (work->remaining > 0) pthread_cond_wait(&work->cond, &work->mutex);
+    pthread_mutex_unlock(&work->mutex);
+    pthread_mutex_destroy(&work->mutex);
+    pthread_cond_destroy(&work->cond);
+    free(work);
+}
 
 #define MTP 10.0f // meters to pixels
 
 b2WorldId createb2World() {
         // 1. Initialize Box2D World
+    static int g_worker_count = 8; // number of threads for Box2D
+    // initialize persistent pool
+    pool_init(g_worker_count);
+
     b2WorldDef worldDef = b2DefaultWorldDef();
-    worldDef.gravity = (b2Vec2){0.0f, 0.8f}; // Gravity points "down" in SDL coordinates
+    worldDef.gravity = (b2Vec2){0.0f, 0.0f}; // Gravity points "down" in SDL coordinates
+    worldDef.workerCount = g_worker_count;
+    worldDef.enqueueTask = box2d_enqueue_task;
+    worldDef.finishTask = box2d_finish_task;
+    worldDef.userTaskContext = &g_worker_count;
     return b2CreateWorld(&worldDef);
 }
 b2BodyId createBox(b2WorldId worldId, float x, float y) {
@@ -42,8 +196,8 @@ struct physics_data initPhysicsData() {
         for (int x=0; x < size; x++) {
             if (pship[y][x] != 0) {
                 // Create a box at this position
-                float posX = x + 5.0f; // Offset to center
-                float posY = y + 2.0f; // Offset to center
+                float posX = x + 15.0f; // Offset to center
+                float posY = y + 12.0f; // Offset to center
                 b2BodyId bodyId = createBox(pdata.worldId, posX, posY);
                 pd_add_body(&pdata, bodyId);
             }
@@ -54,8 +208,8 @@ struct physics_data initPhysicsData() {
 
 int main(int argc, char* argv[]) {
     // 1. Initialize SDL3 (specifically the video subsystem)
-    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
-        SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Couldnt initialize SDL: %s\n", SDL_GetError());
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Couldn't initialize SDL: %s\n", SDL_GetError());
         return 1;
     }
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
@@ -63,12 +217,19 @@ int main(int argc, char* argv[]) {
     SDL_Window* window = SDL_CreateWindow("Bigunit the game",1024,768,0);
     // Create the renderer to handle the background
     SDL_Renderer* renderer = SDL_CreateRenderer(window, NULL);
-    SDL_SetRenderVSync(renderer, 1);
+    if (renderer) SDL_SetRenderVSync(renderer, 1);
     // Check that the window was successfully created
      if (!window || !renderer) {
         SDL_Log("Initialization Error: %s", SDL_GetError());
         SDL_Quit();
         return 1;
+    }
+
+    // Create a 1x1 white texture we can scale and rotate when rendering boxes
+    SDL_Texture* boxTex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STATIC, 1, 1);
+    if (boxTex) {
+        Uint32 white = 0xFFFFFFFFu;
+        SDL_UpdateTexture(boxTex, NULL, &white, sizeof(white));
     }
 
     // Initialize Physics Data
@@ -80,34 +241,61 @@ int main(int argc, char* argv[]) {
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT) {
                 done = true;
+            } else if (event.type == SDL_EVENT_KEY_DOWN) {
+                switch (event.key.key) {
+                case SDLK_ESCAPE:
+                    done = true;
+                    break;
+                case SDLK_SPACE: {
+                    // Add a new box at random position near the top
+                    float x = (rand() % 80) + 10; // Random x between 10 and 90
+                    float y = 10.0f; // Start near the top
+                    b2BodyId bodyId = createBox(pdata.worldId, x, y);
+                    pd_add_body(&pdata, bodyId);
+                    b2Body_ApplyForceToCenter(bodyId, (b2Vec2){(rand() % 800) - 400, (rand() % 800) - 400}, true); // Apply an initial upward force
+                    break;
+                }
+                default:
+                    break;
+                }
             }
-        }        // --- RENDER SECTION ---
+        }
         // 3. Step Physics (approx 60fps)
-        b2World_Step(pdata.worldId, 1.0f / 60.0f, 4);
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%d bodies size %d\n", pdata.count, pdata.capacity);
+        b2World_Step(pdata.worldId, 1.0f / 60.0f, 1);
+        // SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%d bodies size %d\n", pdata.count, pdata.capacity);
 
 
-        // --- RENDER ---
+        // clear screen to black
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
 
-        // Get Box position and draw it
-        for (int i = 0; i < pdata.count; i++) {
+        // Render each body on the main thread (single-threaded)
+        int count = pdata.count;
+        for (int i = 0; i < count; i++) {
             b2BodyId bodyId = pdata.bodyIds[i];
             b2Vec2 pos = b2Body_GetPosition(bodyId);
-            SDL_FRect rect = {
-                (pos.x - 0.5f) * MTP, // Top-left X
-                (pos.y - 0.5f) * MTP, // Top-left Y
-                1.0f * MTP,           // Width
-                1.0f * MTP            // Height
-            };
-
-            SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255); // Green Box
-            SDL_RenderFillRect(renderer, &rect);
+            b2Transform xf = b2Body_GetTransform(bodyId);
+            float ang = b2Rot_GetAngle(xf.q);
+            float w = MTP;
+            float h = MTP;
+            SDL_FRect dst = { pos.x * MTP - w * 0.5f, pos.y * MTP - h * 0.5f, w, h };
+            double angle_deg = -ang * 180.0 / M_PI;
+            if (boxTex) {
+                SDL_SetTextureColorMod(boxTex, 255, 255, 0);
+                SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
+                SDL_RenderTextureRotated(renderer, boxTex, NULL, &dst, angle_deg, &center, SDL_FLIP_NONE);
+            } else {
+                SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
+                SDL_RenderFillRect(renderer, &dst);
+            }
         }
+
         SDL_RenderPresent(renderer);
     }
     // 4. Close and destroy the window, and clean up SDL
+    pool_shutdown();
+    pd_free(&pdata);
+    if (boxTex) SDL_DestroyTexture(boxTex);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
