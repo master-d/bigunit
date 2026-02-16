@@ -150,6 +150,10 @@ static void box2d_finish_task(void* userTask, void* userContext) {
 }
 
 #define MTP 10.0f // meters to pixels
+#define XRES 1920
+#define YRES 1080
+#define XGRAVITY 0.0f
+#define YGRAVITY 0.0f
 
 b2WorldId createb2World() {
         // 1. Initialize Box2D World
@@ -158,51 +162,26 @@ b2WorldId createb2World() {
     pool_init(g_worker_count);
 
     b2WorldDef worldDef = b2DefaultWorldDef();
-    worldDef.gravity = (b2Vec2){0.0f, 0.0f}; // Gravity points "down" in SDL coordinates
+    worldDef.gravity = (b2Vec2){XGRAVITY, YGRAVITY};
     worldDef.workerCount = g_worker_count;
     worldDef.enqueueTask = box2d_enqueue_task;
     worldDef.finishTask = box2d_finish_task;
     worldDef.userTaskContext = &g_worker_count;
     return b2CreateWorld(&worldDef);
 }
-b2BodyId createBox(b2WorldId worldId, float x, float y) {
-        // 2. Create a Dynamic Box
-    b2BodyDef bodyDef = b2DefaultBodyDef();
-    bodyDef.type = b2_dynamicBody;
-    bodyDef.fixedRotation = false;
-    bodyDef.position = (b2Vec2){x, y}; // Center-screen roughly
-    b2BodyId bodyId = b2CreateBody(worldId, &bodyDef);
 
-    b2Polygon box = b2MakeBox(0.5f, 0.5f); // 1m x 1m box (half-extents)
-    b2ShapeDef shapeDef = b2DefaultShapeDef();
-    shapeDef.density = 1.0f;
-    b2CreatePolygonShape(bodyId, &shapeDef, &box);    
-
-    return bodyId;
-}
 struct physics_data initPhysicsData() {
     struct physics_data pdata = pd_init(createb2World());
 
-    b2BodyDef groundBodyDef = b2DefaultBodyDef();
-    groundBodyDef.position = (b2Vec2){0.0f, 80.0f}; // 10 meters below origin
-    b2BodyId groundId = b2CreateBody(pdata.worldId, &groundBodyDef);
-    b2Polygon groundPolygon = b2MakeBox(50.0f, 10.0f);
-    b2ShapeDef groundShapeDef = b2DefaultShapeDef();
-    b2CreatePolygonShape(groundId, &groundShapeDef, &groundPolygon);
-    pd_add_body(&pdata, groundId);
+    // b2BodyDef groundBodyDef = b2DefaultBodyDef();
+    // groundBodyDef.position = (b2Vec2){0.0f, 80.0f}; // 10 meters below origin
+    // b2BodyId groundId = b2CreateBody(pdata.worldId, &groundBodyDef);
+    // b2Polygon groundPolygon = b2MakeBox(50.0f, 10.0f);
+    // b2ShapeDef groundShapeDef = b2DefaultShapeDef();
+    // b2CreatePolygonShape(groundId, &groundShapeDef, &groundPolygon);
+    // pd_add_body(&pdata, groundId);
 
-    int size = 10;
-    for (int y = 0; y < size; y++) {
-        for (int x=0; x < size; x++) {
-            if (pship[y][x] != 0) {
-                // Create a box at this position
-                float posX = x + 15.0f; // Offset to center
-                float posY = y + 12.0f; // Offset to center
-                b2BodyId bodyId = createBox(pdata.worldId, posX, posY);
-                pd_add_body(&pdata, bodyId);
-            }
-        }
-    }
+    pd_create_welded_body(&pdata, &pship_data, 50.0f, 50.0f);
     return pdata;
 }
 
@@ -214,7 +193,7 @@ int main(int argc, char* argv[]) {
     }
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
     // 2. Create an application window
-    SDL_Window* window = SDL_CreateWindow("Bigunit the game",1024,768,0);
+    SDL_Window* window = SDL_CreateWindow("Bigunit the game",XRES,YRES,0);
     // Create the renderer to handle the background
     SDL_Renderer* renderer = SDL_CreateRenderer(window, NULL);
     if (renderer) SDL_SetRenderVSync(renderer, 1);
@@ -252,7 +231,7 @@ int main(int argc, char* argv[]) {
                     float y = 10.0f; // Start near the top
                     b2BodyId bodyId = createBox(pdata.worldId, x, y);
                     pd_add_body(&pdata, bodyId);
-                    b2Body_ApplyForceToCenter(bodyId, (b2Vec2){(rand() % 800) - 400, (rand() % 800) - 400}, true); // Apply an initial upward force
+                    b2Body_ApplyForceToCenter(bodyId, (b2Vec2){(rand() % 10000) - 5000, (rand() % 10000) - 5000}, true); // Apply an initial upward force
                     break;
                 }
                 default:
@@ -270,16 +249,19 @@ int main(int argc, char* argv[]) {
         SDL_RenderClear(renderer);
 
         // Render each body on the main thread (single-threaded)
+        pd_cleanup(&pdata, XRES/MTP, YRES/MTP); // Remove bodies that are out of bounds
         int count = pdata.count;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%d bodies", count);
         for (int i = 0; i < count; i++) {
             b2BodyId bodyId = pdata.bodyIds[i];
             b2Vec2 pos = b2Body_GetPosition(bodyId);
+
             b2Transform xf = b2Body_GetTransform(bodyId);
             float ang = b2Rot_GetAngle(xf.q);
             float w = MTP;
             float h = MTP;
             SDL_FRect dst = { pos.x * MTP - w * 0.5f, pos.y * MTP - h * 0.5f, w, h };
-            double angle_deg = -ang * 180.0 / M_PI;
+            double angle_deg = ang * 180.0 / M_PI;
             if (boxTex) {
                 SDL_SetTextureColorMod(boxTex, 255, 255, 0);
                 SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
