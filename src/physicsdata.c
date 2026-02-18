@@ -11,7 +11,12 @@ b2BodyId createBox(b2WorldId worldId, float x, float y) {
     b2Polygon box = b2MakeBox(0.5f, 0.5f); // 1m x 1m box (half-extents)
     b2ShapeDef shapeDef = b2DefaultShapeDef();
     shapeDef.density = 1.0f;
+    // Enable contact events for this shape so the world will report collisions
+    shapeDef.enableContactEvents = true;
     b2CreatePolygonShape(bodyId, &shapeDef, &box);    
+
+    // Also enable contact events on the body (optional but ensures events are delivered)
+    // b2Body_EnableContactEvents(bodyId, true);
 
     return bodyId;
 }
@@ -21,27 +26,27 @@ struct physics_data pd_init(b2WorldId worldId) {
     pdata.worldId = worldId;
     pdata.count = 0;
     pdata.capacity = 20; // Start small, grow as needed
-    pdata.bodyIds = malloc(pdata.capacity * sizeof(b2BodyId));
+    pdata.bodies = malloc(pdata.capacity * sizeof(struct pbody));
     return pdata;
 }
 
-void pd_add_body(struct physics_data* pdata, b2BodyId id) {
+void pd_add_body(struct physics_data* pdata, struct pbody pbody) {
     if (pdata->count == pdata->capacity) {
         // Double the capacity
         pdata->capacity *= 2;
         
         // Reallocate memory to the new size
-        b2BodyId* temp = (b2BodyId*)realloc(pdata->bodyIds, pdata->capacity * sizeof(b2BodyId));
+        struct pbody* temp = (struct pbody*)realloc(pdata->bodies, pdata->capacity * sizeof(struct pbody));
         
         if (temp == NULL) {
             // Handle memory error here (e.g., exit or log)
             return;
         }
-        pdata->bodyIds = temp;
+        pdata->bodies = temp;
     }
 
-    // Add the new ID and increment the count
-    pdata->bodyIds[pdata->count] = id;
+    // Add the new pbody and increment the count
+    pdata->bodies[pdata->count] = pbody;
     pdata->count++;
 }
 void pd_create_welded_body(struct physics_data* pdata, const ship_data* wbody, float offsetX, float offsetY) {
@@ -60,7 +65,7 @@ void pd_create_welded_body(struct physics_data* pdata, const ship_data* wbody, f
                 float posX = x + offsetX;
                 float posY = y + offsetY;
                 b2BodyId bodyId = createBox(pdata->worldId, posX, posY);
-                pd_add_body(pdata, bodyId);
+                pd_add_body(pdata,  (struct pbody){ .id = bodyId, .welded = true });
 
                 // store in grid for neighbor lookups
                 grid[y * w + x] = bodyId;
@@ -107,13 +112,13 @@ void pd_weld_bodies(struct physics_data* pdata, b2BodyId bodyIdA, b2BodyId bodyI
 void pd_cleanup(struct physics_data* pdata, uint32_t xres, uint32_t yres) {
     int i = 0;
     while (i < pdata->count) {
-        b2BodyId bodyId = pdata->bodyIds[i];
+        b2BodyId bodyId = pdata->bodies[i].id;
         b2Vec2 pos = b2Body_GetPosition(bodyId);
         if (pos.x < -2 || pos.x > xres || pos.y < -2 || pos.y > yres) {
             // Destroy the body in the Box2D world
             b2DestroyBody(bodyId);
             // Remove from array by swapping with last and reducing count
-            pdata->bodyIds[i] = pdata->bodyIds[pdata->count - 1];
+            pdata->bodies[i] = pdata->bodies[pdata->count - 1];
             pdata->count--;
         } else {
             i++;
@@ -124,8 +129,8 @@ void pd_free(struct physics_data* pdata) {
     // 1. (Optional) Loop through and b2DestroyBody() if needed
     
     // 2. Free the array memory
-    free(pdata->bodyIds);
-    pdata->bodyIds = NULL;
+    free(pdata->bodies);
+    pdata->bodies = NULL;
     pdata->count = 0;
     pdata->capacity = 0;
 }

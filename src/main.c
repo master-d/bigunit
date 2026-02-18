@@ -167,7 +167,11 @@ b2WorldId createb2World() {
     worldDef.enqueueTask = box2d_enqueue_task;
     worldDef.finishTask = box2d_finish_task;
     worldDef.userTaskContext = &g_worker_count;
-    return b2CreateWorld(&worldDef);
+
+    b2WorldId worldId = b2CreateWorld(&worldDef);
+    b2World_SetHitEventThreshold(worldId, 0.0f); 
+
+    return worldId;
 }
 
 struct physics_data initPhysicsData() {
@@ -225,12 +229,52 @@ int main(int argc, char* argv[]) {
                 case SDLK_ESCAPE:
                     done = true;
                     break;
+                case SDLK_W: {
+                    // Move ship up - find first welded body
+                    for (int i = 0; i < pdata.count; i++) {
+                        if (pdata.bodies[i].welded) {
+                            b2Body_ApplyForceToCenter(pdata.bodies[i].id, (b2Vec2){0.0f, -1000.0f}, true);
+                            break;
+                        }
+                    }
+                    break;
+                }
+                case SDLK_S: {
+                    // Move ship down - find first welded body
+                    for (int i = 0; i < pdata.count; i++) {
+                        if (pdata.bodies[i].welded) {
+                            b2Body_ApplyForceToCenter(pdata.bodies[i].id, (b2Vec2){0.0f, 1000.0f}, true);
+                            break;
+                        }
+                    }
+                    break;
+                }
+                case SDLK_A: {
+                    // Move ship left - find first welded body
+                    for (int i = 0; i < pdata.count; i++) {
+                        if (pdata.bodies[i].welded) {
+                            b2Body_ApplyForceToCenter(pdata.bodies[i].id, (b2Vec2){-1000.0f, 0.0f}, true);
+                            break;
+                        }
+                    }
+                    break;
+                }
+                case SDLK_D: {
+                    // Move ship right - find first welded body
+                    for (int i = 0; i < pdata.count; i++) {
+                        if (pdata.bodies[i].welded) {
+                            b2Body_ApplyForceToCenter(pdata.bodies[i].id, (b2Vec2){1000.0f, 0.0f}, true);
+                            break;
+                        }
+                    }
+                    break;
+                }
                 case SDLK_SPACE: {
                     // Add a new box at random position near the top
                     float x = (rand() % 80) + 10; // Random x between 10 and 90
                     float y = 10.0f; // Start near the top
                     b2BodyId bodyId = createBox(pdata.worldId, x, y);
-                    pd_add_body(&pdata, bodyId);
+                    pd_add_body(&pdata, (struct pbody){ .id = bodyId, .welded = false });
                     b2Body_ApplyForceToCenter(bodyId, (b2Vec2){(rand() % 10000) - 5000, (rand() % 10000) - 5000}, true); // Apply an initial upward force
                     break;
                 }
@@ -251,12 +295,57 @@ int main(int argc, char* argv[]) {
         // Render each body on the main thread (single-threaded)
         pd_cleanup(&pdata, XRES/MTP, YRES/MTP); // Remove bodies that are out of bounds
         int count = pdata.count;
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%d bodies", count);
-        for (int i = 0; i < count; i++) {
-            b2BodyId bodyId = pdata.bodyIds[i];
-            b2Vec2 pos = b2Body_GetPosition(bodyId);
+        // SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%d bodies", count);
 
-            b2Transform xf = b2Body_GetTransform(bodyId);
+        // 6. Check for collisions/contacts ONCE per frame (before rendering)
+        b2ContactEvents contactEvents = b2World_GetContactEvents(pdata.worldId); 
+        
+        // Use BEGIN contact events (which ARE firing)
+        for (int j = 0; j < contactEvents.beginCount; j++) {
+            b2ContactBeginTouchEvent* ev = &contactEvents.beginEvents[j];
+            b2ShapeId shapeA = ev->shapeIdA;
+            b2ShapeId shapeB = ev->shapeIdB;
+            
+            b2BodyId bodyA = b2Shape_GetBody(shapeA);
+            b2BodyId bodyB = b2Shape_GetBody(shapeB);
+            
+            // Get relative velocity at contact point for impact speed
+            b2Vec2 velA = b2Body_GetLinearVelocity(bodyA);
+            b2Vec2 velB = b2Body_GetLinearVelocity(bodyB);
+            b2Vec2 relVel = (b2Vec2){velA.x - velB.x, velA.y - velB.y};
+            float approachSpeed = (float)sqrt(relVel.x * relVel.x + relVel.y * relVel.y);
+            
+            // SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "BEGIN EVENT: relative speed %.2f", approachSpeed);
+            
+            // Check if either body is in our welded set
+            for (int i = 0; i < count; i++) {
+                struct pbody pb = pdata.bodies[i];
+                if (!pb.welded) continue;  // Only care about welded bodies
+                
+                if (B2_ID_EQUALS(bodyA, pb.id) || B2_ID_EQUALS(bodyB, pb.id)) {
+                    int jointCount = b2Body_GetJointCount(pb.id);
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Welded body contact with speed %.2f, joints: %d", approachSpeed, jointCount);
+                    
+                    if (approachSpeed > 5.0f && jointCount > 0) {
+                        // Remove weld joints on contact
+                        b2JointId* joints = (b2JointId*)malloc(jointCount * sizeof(b2JointId));
+                        int actualCount = b2Body_GetJoints(pb.id, joints, jointCount);
+                        for (int k = 0; k < actualCount; k++) {
+                            b2DestroyJoint(joints[k]);
+                        }
+                        free(joints);
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Destroyed %d weld joints", actualCount);
+                    }
+                    break;
+                }
+            }
+        }
+
+        for (int i = 0; i < count; i++) {
+            struct pbody pb = pdata.bodies[i];
+            b2Vec2 pos = b2Body_GetPosition(pb.id);
+
+            b2Transform xf = b2Body_GetTransform(pb.id);
             float ang = b2Rot_GetAngle(xf.q);
             float w = MTP;
             float h = MTP;

@@ -15,4 +15,4 @@ find_package(Threads REQUIRED)
 add_executable(bigunit src/main.c src/data.c src/physicsdata.c)
 # set_target_properties(bigunit PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Link libraries to the executable
-target_link_libraries(bigunit PRIVATE SDL3::SDL3 box2d::box2d Threads::Threads)
+target_link_libraries(bigunit PRIVATE SDL3::SDL3 box2d::box2d Threads::Threads m)
