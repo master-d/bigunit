@@ -174,8 +174,8 @@ b2WorldId createb2World() {
     return worldId;
 }
 
-struct physics_data initPhysicsData() {
-    struct physics_data pdata = pd_init(createb2World());
+physics_data initPhysicsData() {
+    physics_data pdata = pd_init(createb2World());
 
     // b2BodyDef groundBodyDef = b2DefaultBodyDef();
     // groundBodyDef.position = (b2Vec2){0.0f, 80.0f}; // 10 meters below origin
@@ -185,7 +185,8 @@ struct physics_data initPhysicsData() {
     // b2CreatePolygonShape(groundId, &groundShapeDef, &groundPolygon);
     // pd_add_body(&pdata, groundId);
 
-    pd_create_welded_body(&pdata, &pship_data, 50.0f, 50.0f);
+    //pd_create_welded_body(&pdata, &pship_data, 50.0f, 50.0f);
+    pd_createPolygon(&pdata, &pship_data, 50.0f, 50.0f, true, true);
     return pdata;
 }
 
@@ -216,7 +217,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Initialize Physics Data
-    struct physics_data pdata = initPhysicsData();
+    physics_data pdata = initPhysicsData();
     bool done = false;
     while (!done) {
         SDL_Event event;
@@ -230,9 +231,9 @@ int main(int argc, char* argv[]) {
                     done = true;
                     break;
                 case SDLK_W: {
-                    // Move ship up - find first welded body
+                    // Move ship up - find first controllable body
                     for (int i = 0; i < pdata.count; i++) {
-                        if (pdata.bodies[i].welded) {
+                        if (pdata.bodies[i].controllable) {
                             b2Body_ApplyForceToCenter(pdata.bodies[i].id, (b2Vec2){0.0f, -1000.0f}, true);
                             break;
                         }
@@ -240,9 +241,8 @@ int main(int argc, char* argv[]) {
                     break;
                 }
                 case SDLK_S: {
-                    // Move ship down - find first welded body
                     for (int i = 0; i < pdata.count; i++) {
-                        if (pdata.bodies[i].welded) {
+                        if (pdata.bodies[i].controllable) {
                             b2Body_ApplyForceToCenter(pdata.bodies[i].id, (b2Vec2){0.0f, 1000.0f}, true);
                             break;
                         }
@@ -250,9 +250,8 @@ int main(int argc, char* argv[]) {
                     break;
                 }
                 case SDLK_A: {
-                    // Move ship left - find first welded body
                     for (int i = 0; i < pdata.count; i++) {
-                        if (pdata.bodies[i].welded) {
+                        if (pdata.bodies[i].controllable) {
                             b2Body_ApplyForceToCenter(pdata.bodies[i].id, (b2Vec2){-1000.0f, 0.0f}, true);
                             break;
                         }
@@ -260,9 +259,9 @@ int main(int argc, char* argv[]) {
                     break;
                 }
                 case SDLK_D: {
-                    // Move ship right - find first welded body
+                    // Move ship right - find first controllable body
                     for (int i = 0; i < pdata.count; i++) {
-                        if (pdata.bodies[i].welded) {
+                        if (pdata.bodies[i].controllable) {
                             b2Body_ApplyForceToCenter(pdata.bodies[i].id, (b2Vec2){1000.0f, 0.0f}, true);
                             break;
                         }
@@ -273,9 +272,8 @@ int main(int argc, char* argv[]) {
                     // Add a new box at random position near the top
                     float x = (rand() % 80) + 10; // Random x between 10 and 90
                     float y = 10.0f; // Start near the top
-                    b2BodyId bodyId = createBox(pdata.worldId, x, y);
-                    pd_add_body(&pdata, (struct pbody){ .id = bodyId, .welded = false });
-                    b2Body_ApplyForceToCenter(bodyId, (b2Vec2){(rand() % 10000) - 5000, (rand() % 10000) - 5000}, true); // Apply an initial upward force
+                    pbody body = pd_createBox(&pdata, x, y);
+                    b2Body_ApplyForceToCenter(body.id, (b2Vec2){(rand() % 10000) - 5000, (rand() % 10000) - 5000}, true); // Apply an initial upward force
                     break;
                 }
                 default:
@@ -294,7 +292,7 @@ int main(int argc, char* argv[]) {
 
         // Render each body on the main thread (single-threaded)
         pd_cleanup(&pdata, XRES/MTP, YRES/MTP); // Remove bodies that are out of bounds
-        int count = pdata.count;
+        const int bodyCount = pdata.count;
         // SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%d bodies", count);
 
         // 6. Check for collisions/contacts ONCE per frame (before rendering)
@@ -315,49 +313,51 @@ int main(int argc, char* argv[]) {
             b2Vec2 relVel = (b2Vec2){velA.x - velB.x, velA.y - velB.y};
             float approachSpeed = (float)sqrt(relVel.x * relVel.x + relVel.y * relVel.y);
             
-            // SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "BEGIN EVENT: relative speed %.2f", approachSpeed);
-            
-            // Check if either body is in our welded set
-            for (int i = 0; i < count; i++) {
-                struct pbody pb = pdata.bodies[i];
-                if (!pb.welded) continue;  // Only care about welded bodies
+            // Check if either body is in our breakable set
+            for (int i = 0; i < bodyCount; i++) {
+                pbody pb = pdata.bodies[i];
+                if (!pb.breakable) continue;
                 
-                if (B2_ID_EQUALS(bodyA, pb.id) || B2_ID_EQUALS(bodyB, pb.id)) {
-                    int jointCount = b2Body_GetJointCount(pb.id);
-                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Welded body contact with speed %.2f, joints: %d", approachSpeed, jointCount);
-                    
-                    if (approachSpeed > 5.0f && jointCount > 0) {
-                        // Remove weld joints on contact
-                        b2JointId* joints = (b2JointId*)malloc(jointCount * sizeof(b2JointId));
-                        int actualCount = b2Body_GetJoints(pb.id, joints, jointCount);
-                        for (int k = 0; k < actualCount; k++) {
-                            b2DestroyJoint(joints[k]);
-                        }
-                        free(joints);
-                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Destroyed %d weld joints", actualCount);
-                    }
-                    break;
+                b2ShapeId shapeToBreak = b2_nullShapeId;
+                if (B2_ID_EQUALS(bodyA, pb.id) && approachSpeed > 5.0f) {
+                    shapeToBreak = shapeA;
+                } else if (B2_ID_EQUALS(bodyB, pb.id) && approachSpeed > 5.0f) {
+                    shapeToBreak = shapeB;
                 }
+                
+                if (!b2Shape_IsValid(shapeToBreak)) continue;
+                
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Breaking off shape with approach speed %.2f", approachSpeed);
+                pd_breakOffShape(&pdata, pb.id, shapeToBreak);
+                break;
             }
         }
 
-        for (int i = 0; i < count; i++) {
-            struct pbody pb = pdata.bodies[i];
-            b2Vec2 pos = b2Body_GetPosition(pb.id);
+        for (int i = 0; i < bodyCount; i++) {
+            pbody pb = pdata.bodies[i];
+            b2Vec2 bodyPos = b2Body_GetPosition(pb.id);
 
             b2Transform xf = b2Body_GetTransform(pb.id);
             float ang = b2Rot_GetAngle(xf.q);
-            float w = MTP;
-            float h = MTP;
-            SDL_FRect dst = { pos.x * MTP - w * 0.5f, pos.y * MTP - h * 0.5f, w, h };
             double angle_deg = ang * 180.0 / M_PI;
-            if (boxTex) {
-                SDL_SetTextureColorMod(boxTex, 255, 255, 0);
-                SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
-                SDL_RenderTextureRotated(renderer, boxTex, NULL, &dst, angle_deg, &center, SDL_FLIP_NONE);
-            } else {
-                SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
-                SDL_RenderFillRect(renderer, &dst);
+            
+            // Render each shape with its local offset
+            for (int s = 0; s < pb.shapeCount; s++) {
+                b2Vec2 offset = pb.shapeOffsets ? pb.shapeOffsets[s] : (b2Vec2){0, 0};
+                b2Vec2 shapeWorldPos = b2TransformPoint(xf, offset);
+                
+                float w = MTP;
+                float h = MTP;
+                SDL_FRect dst = { shapeWorldPos.x * MTP - w * 0.5f, shapeWorldPos.y * MTP - h * 0.5f, w, h };
+                
+                if (boxTex) {
+                    SDL_SetTextureColorMod(boxTex, 255, 255, 0);
+                    SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
+                    SDL_RenderTextureRotated(renderer, boxTex, NULL, &dst, angle_deg, &center, SDL_FLIP_NONE);
+                } else {
+                    SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
+                    SDL_RenderFillRect(renderer, &dst);
+                }
             }
         }
 
