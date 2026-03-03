@@ -156,7 +156,7 @@ static void box2d_finish_task(void* userTask, void* userContext) {
 #define YGRAVITY 0.0f
 
 b2WorldId createb2World() {
-        // 1. Initialize Box2D World
+    // 1. Initialize Box2D World
     static int g_worker_count = 8; // number of threads for Box2D
     // initialize persistent pool
     pool_init(g_worker_count);
@@ -216,6 +216,8 @@ int main(int argc, char* argv[]) {
         SDL_UpdateTexture(boxTex, NULL, &white, sizeof(white));
     }
 
+    bool step_mode = false; // If true, physics only steps when 'n' is pressed
+    bool pause = false; // If true, physics is paused and won't step
     // Initialize Physics Data
     physics_data pdata = initPhysicsData();
     bool done = false;
@@ -230,6 +232,15 @@ int main(int argc, char* argv[]) {
                 case SDLK_ESCAPE:
                     done = true;
                     break;
+                case SDLK_P: {
+                    step_mode = !step_mode;
+                    pause = !pause;
+                    break;
+                }
+                case SDLK_N: {
+                    pause = false;
+                    break;
+                }
                 case SDLK_W: {
                     // Move ship up - find first controllable body
                     for (int i = 0; i < pdata.count; i++) {
@@ -282,7 +293,9 @@ int main(int argc, char* argv[]) {
             }
         }
         // 3. Step Physics (approx 60fps)
-        b2World_Step(pdata.worldId, 1.0f / 60.0f, 1);
+        if (!pause)
+            b2World_Step(pdata.worldId, 1.0f / 60.0f, 1);
+        if (step_mode) pause = true; // If in step mode, pause after stepping until 'n' is pressed again
         // SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%d bodies size %d\n", pdata.count, pdata.capacity);
 
 
@@ -298,41 +311,69 @@ int main(int argc, char* argv[]) {
         // 6. Check for collisions/contacts ONCE per frame (before rendering)
         b2ContactEvents contactEvents = b2World_GetContactEvents(pdata.worldId); 
         
-        // Use BEGIN contact events (which ARE firing)
+        // loop through contact events and queue up any break requests.  we collect them
+        // first because destroying a shape while iterating the event list can crash the
+        // world internals.
+        typedef struct { b2BodyId body; b2ShapeId shape; b2Vec2 normal; float speed; } BreakReq;
+        BreakReq breakList[128];
+        int breakCount = 0;
+
         for (int j = 0; j < contactEvents.beginCount; j++) {
             b2ContactBeginTouchEvent* ev = &contactEvents.beginEvents[j];
             b2ShapeId shapeA = ev->shapeIdA;
             b2ShapeId shapeB = ev->shapeIdB;
-            
+
+            if (!b2Shape_IsValid(shapeA) || !b2Shape_IsValid(shapeB)) {
+                continue;
+            }
+
             b2BodyId bodyA = b2Shape_GetBody(shapeA);
             b2BodyId bodyB = b2Shape_GetBody(shapeB);
-            
-            // Get relative velocity at contact point for impact speed
+
+            // relative speed at the contact
             b2Vec2 velA = b2Body_GetLinearVelocity(bodyA);
             b2Vec2 velB = b2Body_GetLinearVelocity(bodyB);
             b2Vec2 relVel = (b2Vec2){velA.x - velB.x, velA.y - velB.y};
             float approachSpeed = (float)sqrt(relVel.x * relVel.x + relVel.y * relVel.y);
-            
-            // Check if either body is in our breakable set
+            if (approachSpeed <= 5.0f) continue;
+
+            b2Vec2 normal = ev->manifold.normal;
+
+            // consider both sides
             for (int i = 0; i < bodyCount; i++) {
-                pbody pb = pdata.bodies[i];
-                if (!pb.breakable) continue;
-                
-                b2ShapeId shapeToBreak = b2_nullShapeId;
-                if (B2_ID_EQUALS(bodyA, pb.id) && approachSpeed > 5.0f) {
-                    shapeToBreak = shapeA;
-                } else if (B2_ID_EQUALS(bodyB, pb.id) && approachSpeed > 5.0f) {
-                    shapeToBreak = shapeB;
+                if (B2_ID_EQUALS(pdata.bodies[i].id, bodyA) && pdata.bodies[i].breakable) {
+                    bool already = false;
+                    for (int k = 0; k < breakCount; k++) {
+                        if (B2_ID_EQUALS(breakList[k].shape, shapeA)) { already = true; break; }
+                    }
+                    if (!already && breakCount < (int)(sizeof(breakList)/sizeof(breakList[0]))) {
+                        // push shapeA away from bodyB: invert normal
+                        breakList[breakCount++] = (BreakReq){ bodyA, shapeA, { -normal.x, -normal.y }, approachSpeed };
+                    }
                 }
-                
-                if (!b2Shape_IsValid(shapeToBreak)) continue;
-                
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Breaking off shape with approach speed %.2f", approachSpeed);
-                pd_breakOffShape(&pdata, pb.id, shapeToBreak);
-                break;
+                if (B2_ID_EQUALS(pdata.bodies[i].id, bodyB) && pdata.bodies[i].breakable) {
+                    bool already = false;
+                    for (int k = 0; k < breakCount; k++) {
+                        if (B2_ID_EQUALS(breakList[k].shape, shapeB)) { already = true; break; }
+                    }
+                    if (!already && breakCount < (int)(sizeof(breakList)/sizeof(breakList[0]))) {
+                        // shapeB pushed along normal
+                        breakList[breakCount++] = (BreakReq){ bodyB, shapeB, normal, approachSpeed };
+                    }
+                }
             }
         }
 
+        // perform all the breaks after scanning events
+        if (breakCount) {
+            //step_mode = true;
+            //pause = true;
+            for (int b = 0; b < breakCount; b++) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Breaking off queued shape (body=%u)\n", breakList[b].body);
+                pd_breakOffShape(&pdata, breakList[b].body, breakList[b].shape, breakList[b].normal, breakList[b].speed);
+            }
+        }
+        // render shapes
         for (int i = 0; i < bodyCount; i++) {
             pbody pb = pdata.bodies[i];
             b2Vec2 bodyPos = b2Body_GetPosition(pb.id);
@@ -358,6 +399,26 @@ int main(int argc, char* argv[]) {
                     SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
                     SDL_RenderFillRect(renderer, &dst);
                 }
+            }
+        }
+        // render bodies in red
+        for (int i = 0; i < bodyCount; i++) {
+            pbody pb = pdata.bodies[i];
+            b2Vec2 pos = b2Body_GetPosition(pb.id);
+
+            b2Transform xf = b2Body_GetTransform(pb.id);
+            float ang = b2Rot_GetAngle(xf.q);
+            float w = MTP / 2.0f;
+            float h = MTP / 2.0f;
+            SDL_FRect dst = { pos.x * MTP - w * 0.5f, pos.y * MTP - h * 0.5f, w, h };
+            double angle_deg = ang * 180.0 / M_PI;
+            if (boxTex) {
+                SDL_SetTextureColorMod(boxTex, 255, 0, 0);
+                SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
+                SDL_RenderTextureRotated(renderer, boxTex, NULL, &dst, angle_deg, &center, SDL_FLIP_NONE);
+            } else {
+                SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
+                SDL_RenderFillRect(renderer, &dst);
             }
         }
 

@@ -27,10 +27,13 @@ typedef struct {
 
 pbody pd_createBox(physics_data* pdata, float x, float y);
 pbody pd_createPolygon(physics_data* pdata, const ship_data* polydata, float x, float y, bool controllable, bool breakable);
-b2BodyId pd_breakOffShape(physics_data* pdata, b2BodyId polygonBodyId, b2ShapeId shapeToBreak);
+
+// Break off a single shape from a polygon body and make it independent.
+// `normal` should point away from the remaining piece (i.e. the direction in
+// which the new fragment should be pushed).  `speed` is the relative impact
+// speed and is used to scale the impulse applied to the fragment.
+b2BodyId pd_breakOffShape(physics_data* pdata, b2BodyId polygonBodyId, b2ShapeId shapeToBreak, b2Vec2 normal, float speed);
 physics_data pd_init(b2WorldId worldId);
 void pd_add_body(physics_data* pdata, pbody pbody);
-void pd_create_welded_body(physics_data* pdata, const ship_data* wbody, float offsetX, float offsetY); // Create a welded body from the ship array
-void pd_weld_bodies(physics_data* pdata, b2BodyId bodyA, b2BodyId bodyB, bool weldx);
 void pd_free(physics_data* pdata);
 void pd_cleanup(physics_data* pdata, uint32_t xres, uint32_t yres); // Remove bodies that are out of bounds
